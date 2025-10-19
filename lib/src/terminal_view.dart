@@ -13,6 +13,7 @@ import 'package:xterm/src/ui/cursor_type.dart';
 import 'package:xterm/src/ui/custom_text_edit.dart';
 import 'package:xterm/src/ui/gesture/gesture_handler.dart';
 import 'package:xterm/src/ui/input_map.dart';
+import 'package:xterm/src/ui/key_repeat_controller.dart';
 import 'package:xterm/src/ui/keyboard_listener.dart';
 import 'package:xterm/src/ui/render.dart';
 import 'package:xterm/src/ui/scroll_handler.dart';
@@ -21,6 +22,15 @@ import 'package:xterm/src/ui/shortcut/shortcuts.dart';
 import 'package:xterm/src/ui/terminal_text_style.dart';
 import 'package:xterm/src/ui/terminal_theme.dart';
 import 'package:xterm/src/ui/themes.dart';
+
+const _repeatableTerminalKeys = <TerminalKey>{
+  TerminalKey.backspace,
+  TerminalKey.delete,
+  TerminalKey.arrowUp,
+  TerminalKey.arrowDown,
+  TerminalKey.arrowLeft,
+  TerminalKey.arrowRight,
+};
 
 class TerminalView extends StatefulWidget {
   const TerminalView(
@@ -181,6 +191,7 @@ class TerminalViewState extends State<TerminalView>
   late FocusNode _focusNode;
 
   late final ShortcutManager _shortcutManager;
+  late final KeyRepeatController _keyRepeatController;
 
   final _customTextEditKey = GlobalKey<CustomTextEditState>();
 
@@ -205,6 +216,7 @@ class TerminalViewState extends State<TerminalView>
 
   @override
   void initState() {
+    _keyRepeatController = KeyRepeatController();
     _focusNode = widget.focusNode ?? FocusNode();
     _focusNode.addListener(_handleFocusChange);
     _controller = widget.controller ?? TerminalController(vsync: this);
@@ -263,6 +275,7 @@ class TerminalViewState extends State<TerminalView>
     if (widget.scrollController == null) {
       _scrollController.dispose();
     }
+    _keyRepeatController.dispose();
     _shortcutManager.dispose();
     textSizeNoti.dispose();
     _cursorBlinkTimer?.cancel();
@@ -449,6 +462,9 @@ class TerminalViewState extends State<TerminalView>
   }
 
   void _handleFocusChange() {
+    if (!_focusNode.hasFocus) {
+      _keyRepeatController.cancel();
+    }
     _updateCursorBlink(resetVisible: true);
   }
 
@@ -549,6 +565,10 @@ class TerminalViewState extends State<TerminalView>
   }
 
   KeyEventResult _handleKeyEvent(FocusNode focusNode, KeyEvent event) {
+    if (event is KeyUpEvent) {
+      _keyRepeatController.handleKeyUp(event);
+    }
+
     final resultOverride = widget.onKeyEvent?.call(focusNode, event);
     if (resultOverride != null && resultOverride != KeyEventResult.ignored) {
       return resultOverride;
@@ -568,17 +588,46 @@ class TerminalViewState extends State<TerminalView>
       return KeyEventResult.ignored;
     }
 
-    // Handle both KeyDownEvent and KeyRepeatEvent for key repeat functionality
-    if (event is! KeyDownEvent && event is! KeyRepeatEvent) {
+    final isKeyDown = event is KeyDownEvent;
+    final isKeyRepeat = event is KeyRepeatEvent;
+
+    if (!isKeyDown && !isKeyRepeat) {
       return KeyEventResult.ignored;
     }
 
     final key = keyToTerminalKey(event.logicalKey);
-
     if (key == null) {
       return KeyEventResult.ignored;
     }
 
+    final repeatable = _repeatableTerminalKeys.contains(key);
+
+    if (isKeyRepeat && repeatable) {
+      _keyRepeatController.handleKeyRepeat(event as KeyRepeatEvent);
+    }
+
+    final handled = _sendTerminalKey(key);
+
+    if (!handled) {
+      if (isKeyDown && repeatable) {
+        _keyRepeatController.cancel();
+      }
+      return KeyEventResult.ignored;
+    }
+
+    if (isKeyDown && repeatable) {
+      _keyRepeatController.handleKeyDown(
+        event as KeyDownEvent,
+        onRepeat: () {
+          _sendTerminalKey(key);
+        },
+      );
+    }
+
+    return KeyEventResult.handled;
+  }
+
+  bool _sendTerminalKey(TerminalKey key) {
     final handled = widget.terminal.keyInput(
       key,
       ctrl: HardwareKeyboard.instance.isControlPressed,
@@ -591,7 +640,7 @@ class TerminalViewState extends State<TerminalView>
       _updateCursorBlink(resetVisible: true);
     }
 
-    return handled ? KeyEventResult.handled : KeyEventResult.ignored;
+    return handled;
   }
 
   void _onEditableRect(Rect rect, Rect caretRect) {
