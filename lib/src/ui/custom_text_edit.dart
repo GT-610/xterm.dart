@@ -91,6 +91,7 @@ class CustomTextEditState extends State<CustomTextEdit>
   Rect _caretRect = Rect.zero;
   TextEditingController? _controller;
   VoidCallback? _controllerListener;
+  DateTime? _skipImeDeleteUntil;
 
   @override
   void initState() {
@@ -455,8 +456,10 @@ class CustomTextEditState extends State<CustomTextEdit>
             _initEditingState.text.substring(0, initTextLength - 1),
           )) {
         // Check if one char was removed
-        widget.onDelete();
-        textChanged = true;
+        if (!_consumeImeDeleteSuppression()) {
+          widget.onDelete();
+          textChanged = true;
+        }
       } else if (currentText.length > initTextLength &&
           currentText.startsWith(_initEditingState.text)) {
         final String textDelta = currentText.substring(initTextLength);
@@ -479,8 +482,10 @@ class CustomTextEditState extends State<CustomTextEdit>
         // This is a simplification. For robust deletion detection without the
         // deleteDetection trick, a diff algorithm or more context is needed.
         // Assuming any reduction when not composing is a delete.
-        widget.onDelete();
-        textChanged = true;
+        if (!_consumeImeDeleteSuppression()) {
+          widget.onDelete();
+          textChanged = true;
+        }
       } else if (currentText.length > previousText.length) {
         // Assumes text is appended. More complex changes (e.g. replacing selection)
         // are handled by setting textEditingValue directly.
@@ -875,13 +880,105 @@ class CustomTextEditState extends State<CustomTextEdit>
       return true;
     }
 
-    if (normalized.contains('delete') && widget.deleteDetection) {
-      widget.onDelete();
+    if (normalized.contains('delete')) {
+      if (_handleImeDeleteCommand(normalized, data)) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  bool _handleImeDeleteCommand(
+    String normalizedAction,
+    Map<String, dynamic> data,
+  ) {
+    if (widget.readOnly) {
+      // Consume the command so the IME does not try to delete cached text.
+      return true;
+    }
+
+    final beforeLength = _extractImeDeleteLength(
+      data,
+      _kImeDeleteBeforeLengthKeys,
+    );
+    final afterLength = _extractImeDeleteLength(
+      data,
+      _kImeDeleteAfterLengthKeys,
+    );
+
+    // Record a suppression window so that a follow-up update from the IME does
+    // not trigger an additional delete.
+    _skipImeDeleteUntil = DateTime.now().add(_kImeDeleteSuppressionWindow);
+
+    final bool handleAsBackspace = beforeLength > 0 || afterLength == 0;
+
+    if (handleAsBackspace) {
+      _emitImeBackspace();
+      return true;
+    }
+
+    if (afterLength > 0) {
+      // Forward delete is not supported by the embedded terminal. Fallback to
+      // a backspace to avoid dropping the entire line.
+      _emitImeBackspace();
       return true;
     }
 
     return false;
   }
+
+  void _emitImeBackspace() {
+    widget.onDelete();
+
+    final resetState = _initEditingState.copyWith();
+    _currentEditingState = resetState;
+    _connection?.setEditingState(resetState);
+    _showCaretOnScreen();
+  }
+
+  bool _consumeImeDeleteSuppression() {
+    final deadline = _skipImeDeleteUntil;
+    if (deadline == null) {
+      return false;
+    }
+
+    _skipImeDeleteUntil = null;
+    return DateTime.now().isBefore(deadline);
+  }
+
+  int _extractImeDeleteLength(
+    Map<String, dynamic> data,
+    List<String> candidateKeys,
+  ) {
+    for (final key in candidateKeys) {
+      final length = _coerceToInt(data[key]);
+      if (length != null && length > 0) {
+        return length;
+      }
+    }
+    return 0;
+  }
+
+  static const _kImeDeleteBeforeLengthKeys = <String>[
+    'beforeLength',
+    'before',
+    'lengthBeforeCursor',
+    'length_before_cursor',
+    'deleteBeforeLength',
+    'delete_before_length',
+  ];
+
+  static const _kImeDeleteAfterLengthKeys = <String>[
+    'afterLength',
+    'after',
+    'lengthAfterCursor',
+    'length_after_cursor',
+    'deleteAfterLength',
+    'delete_after_length',
+  ];
+
+  static const _kImeDeleteSuppressionWindow = Duration(milliseconds: 120);
 
   static const _kPrivateCommandTextKeys = <String>[
     'text',
@@ -922,6 +1019,16 @@ class CustomTextEditState extends State<CustomTextEdit>
       return true;
     }
     return false;
+  }
+
+  int? _coerceToInt(dynamic value) {
+    if (value is int) {
+      return value;
+    }
+    if (value is String) {
+      return int.tryParse(value);
+    }
+    return null;
   }
 
   String? _coerceToString(dynamic value) {
