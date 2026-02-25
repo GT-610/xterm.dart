@@ -50,10 +50,25 @@ class CustomTextEdit extends StatefulWidget {
 
   /// Optional builder to customize the full set of selection toolbar items.
   ///
-  /// The builder receives the current [CustomTextEditState] alongside the
-  /// default toolbar entries and should return the complete list that will be
-  /// shown to the user.
+  /// The builder receives the current [CustomTextEditState] alongside
+  /// the default toolbar entries and should return the complete list
+  /// to be shown to the user.
   final CustomTextEditToolbarBuilder? toolbarBuilder;
+
+  /// Callback to check if there is a selection in the terminal.
+  final bool Function()? hasSelection;
+
+  /// Callback to get the selected text from the terminal.
+  final String Function()? getSelectedText;
+
+  /// Callback invoked after a copy operation completes.
+  final void Function()? onCopied;
+
+  /// Callback to select all text in the terminal.
+  final void Function()? onSelectAll;
+
+  /// Callback to paste text from clipboard to terminal.
+  final void Function()? onPaste;
 
   CustomTextEdit({
     super.key,
@@ -76,6 +91,11 @@ class CustomTextEdit extends StatefulWidget {
     this.enableSuggestions = true,
     this.onPrivateCommand,
     this.toolbarBuilder,
+    this.hasSelection,
+    this.getSelectedText,
+    this.onCopied,
+    this.onSelectAll,
+    this.onPaste,
   });
 
   @override
@@ -114,7 +134,6 @@ class CustomTextEditState extends State<CustomTextEdit>
           setState(() {
             _currentEditingState = _controller!.value;
           });
-          // selection/composing 变更回调
           if (widget.onSelectionChanged != null &&
               oldValue.selection != _currentEditingState.selection) {
             widget.onSelectionChanged!(_currentEditingState.selection, null);
@@ -276,7 +295,6 @@ class CustomTextEditState extends State<CustomTextEdit>
     if (widget.controller != null && widget.controller!.value != value) {
       widget.controller!.value = value;
     }
-    // selection/composing 变更回调
     if (widget.onSelectionChanged != null &&
         oldValue.selection != value.selection) {
       widget.onSelectionChanged!(value.selection, null);
@@ -287,7 +305,7 @@ class CustomTextEditState extends State<CustomTextEdit>
     }
     _connection?.setEditingState(value);
     _showCaretOnScreen();
-    setState(() {}); // UI 响应
+    setState(() {});
   }
 
   void setEditableRect(Rect rect, Rect caretRect) {
@@ -616,9 +634,36 @@ class CustomTextEditState extends State<CustomTextEdit>
     }
 
     _clipboardStatus.update();
+
+    final mediaQuery = MediaQuery.of(context);
+    final screenSize = mediaQuery.size;
+
+    final spaceAbove = anchorRect.top;
+    final spaceBelow = screenSize.height - anchorRect.bottom - mediaQuery.viewInsets.bottom;
+
+    final Offset primaryAnchor;
+    final Offset secondaryAnchor;
+
+    const minSpace = 48.0;
+    if (spaceAbove >= minSpace) {
+      primaryAnchor = anchorRect.topCenter;
+      secondaryAnchor = anchorRect.bottomCenter;
+    } else if (spaceBelow >= minSpace) {
+      primaryAnchor = anchorRect.bottomCenter;
+      secondaryAnchor = anchorRect.topCenter;
+    } else {
+      if (spaceAbove >= spaceBelow) {
+        primaryAnchor = anchorRect.topCenter;
+        secondaryAnchor = anchorRect.bottomCenter;
+      } else {
+        primaryAnchor = anchorRect.bottomCenter;
+        secondaryAnchor = anchorRect.topCenter;
+      }
+    }
+
     _toolbarAnchors = TextSelectionToolbarAnchors(
-      primaryAnchor: anchorRect.bottomCenter,
-      secondaryAnchor: anchorRect.topCenter,
+      primaryAnchor: primaryAnchor,
+      secondaryAnchor: secondaryAnchor,
     );
 
     if (_menuController.isShown) {
@@ -666,9 +711,7 @@ class CustomTextEditState extends State<CustomTextEdit>
       onCopy: copyEnabled
           ? () => copySelection(SelectionChangedCause.toolbar)
           : null,
-      onCut: cutEnabled
-          ? () => cutSelection(SelectionChangedCause.toolbar)
-          : null,
+      onCut: null,
       onPaste: pasteEnabled
           ? () => pasteText(SelectionChangedCause.toolbar)
           : null,
@@ -695,56 +738,53 @@ class CustomTextEditState extends State<CustomTextEdit>
   }
 
   @override
-  bool get copyEnabled => !_currentEditingState.selection.isCollapsed;
+  bool get copyEnabled {
+    if (widget.hasSelection != null) {
+      return widget.hasSelection!();
+    }
+    return !_currentEditingState.selection.isCollapsed;
+  }
 
   @override
-  bool get cutEnabled =>
-      !widget.readOnly && !_currentEditingState.selection.isCollapsed;
+  bool get pasteEnabled => widget.onPaste != null || !widget.readOnly;
 
   @override
-  bool get pasteEnabled => !widget.readOnly;
+  bool get cutEnabled => false;
 
   @override
   bool get selectAllEnabled =>
-      _currentEditingState.text.isNotEmpty &&
-      (_currentEditingState.selection.baseOffset != 0 ||
-          _currentEditingState.selection.extentOffset !=
-              _currentEditingState.text.length);
+      widget.onSelectAll != null ||
+      (_currentEditingState.text.isNotEmpty &&
+          (_currentEditingState.selection.baseOffset != 0 ||
+              _currentEditingState.selection.extentOffset !=
+                  _currentEditingState.text.length));
 
   @override
   void copySelection(SelectionChangedCause cause) {
     if (!copyEnabled) {
       return;
     }
-    Clipboard.setData(
-      ClipboardData(
-        text: _currentEditingState.selection.textInside(
-          _currentEditingState.text,
-        ),
-      ),
-    );
-    if (cause == SelectionChangedCause.toolbar) {
-      hideToolbar();
-    }
-  }
 
-  @override
-  void cutSelection(SelectionChangedCause cause) {
-    if (!cutEnabled) {
+    String selectedText;
+    if (widget.getSelectedText != null) {
+      selectedText = widget.getSelectedText!();
+    } else {
+      selectedText = _currentEditingState.selection.textInside(
+        _currentEditingState.text,
+      );
+    }
+
+    if (selectedText.isEmpty) {
       return;
     }
-    final selection = _currentEditingState.selection;
-    final text = _currentEditingState.text;
-    Clipboard.setData(ClipboardData(text: selection.textInside(text)));
-    final newText = selection.textBefore(text) + selection.textAfter(text);
-    textEditingValue = TextEditingValue(
-      text: newText,
-      selection: TextSelection.collapsed(offset: selection.start),
-    );
+
+    Clipboard.setData(ClipboardData(text: selectedText)).then((_) {
+      widget.onCopied?.call();
+    });
+
     if (cause == SelectionChangedCause.toolbar) {
       hideToolbar();
     }
-    _showCaretOnScreen();
   }
 
   @override
@@ -752,6 +792,15 @@ class CustomTextEditState extends State<CustomTextEdit>
     if (!pasteEnabled) {
       return;
     }
+    
+    if (widget.onPaste != null) {
+      widget.onPaste!();
+      if (cause == SelectionChangedCause.toolbar) {
+        hideToolbar();
+      }
+      return;
+    }
+    
     final ClipboardData? data = await Clipboard.getData(Clipboard.kTextPlain);
     if (data == null || data.text == null) {
       return;
@@ -774,7 +823,11 @@ class CustomTextEditState extends State<CustomTextEdit>
 
   @override
   void selectAll(SelectionChangedCause cause) {
-    if (!widget.readOnly && _currentEditingState.text.isNotEmpty) {
+    if (widget.onSelectAll != null) {
+      widget.onSelectAll!();
+      _menuController.markNeedsBuild();
+      setState(() {});
+    } else if (!widget.readOnly && _currentEditingState.text.isNotEmpty) {
       textEditingValue = _currentEditingState.copyWith(
         selection: TextSelection(
           baseOffset: 0,
@@ -783,6 +836,10 @@ class CustomTextEditState extends State<CustomTextEdit>
       );
       _showCaretOnScreen();
     }
+  }
+
+  @override
+  void cutSelection(SelectionChangedCause cause) {
   }
 
   @override

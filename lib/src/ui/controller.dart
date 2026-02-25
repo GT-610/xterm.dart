@@ -132,8 +132,8 @@ class TerminalController with ChangeNotifier {
   }) {
     final controller = AnimationController(
       duration: type == SelectionAnimationType.insert 
-          ? const Duration(milliseconds: 200)
-          : const Duration(milliseconds: 300),
+          ? const Duration(milliseconds: 100)
+          : const Duration(milliseconds: 150),
       vsync: _vsync,
     );
 
@@ -141,22 +141,19 @@ class TerminalController with ChangeNotifier {
     late Animation<Offset> positionAnimation;
 
     if (type == SelectionAnimationType.insert) {
-      // 插入动画：130% 缩小到 100%
       scaleAnimation = Tween<double>(
-        begin: 1.3,
+        begin: 1.0,
         end: 1.0,
       ).animate(CurvedAnimation(
         parent: controller,
-        curve: Curves.elasticOut,
+        curve: Curves.easeOut,
       ));
-      
-      // 插入时位置不变
+
       positionAnimation = Tween<Offset>(
         begin: Offset.zero,
         end: Offset.zero,
       ).animate(controller);
     } else {
-      // 更新动画：位置从旧位置移动到新位置
       scaleAnimation = Tween<double>(
         begin: 1.0,
         end: 1.0,
@@ -174,11 +171,10 @@ class TerminalController with ChangeNotifier {
         end: Offset.zero,
       ).animate(CurvedAnimation(
         parent: controller,
-        curve: Curves.easeOutCubic,
+        curve: Curves.easeOut,
       ));
     }
 
-    // 动画完成后清理
     controller.addStatusListener((status) {
       if (status == AnimationStatus.completed) {
         _selectionAnimation?.dispose();
@@ -187,12 +183,10 @@ class TerminalController with ChangeNotifier {
       }
     });
 
-    // 动画过程中触发重绘
     controller.addListener(() {
       notifyListeners();
     });
 
-    // 启动动画
     controller.forward();
 
     return SelectionAnimation(
